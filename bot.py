@@ -25,7 +25,6 @@ def self_ping():
     while True:
         time.sleep(240)  # 4 minutes
         try:
-            # Get the URL from environment or use localhost
             url = os.environ.get('BOT_URL', 'http://localhost:8080')
             requests.get(url, timeout=10)
             print(f"[{datetime.now()}] Self-ping successful")
@@ -34,11 +33,9 @@ def self_ping():
 
 def start_keep_alive():
     """Starts both the webserver and self-ping"""
-    # Start web server in background
     web_thread = threading.Thread(target=run_webserver, daemon=True)
     web_thread.start()
     
-    # Start self-ping in background
     ping_thread = threading.Thread(target=self_ping, daemon=True)
     ping_thread.start()
     
@@ -50,6 +47,9 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Store active tickets
 active_tickets = {}
+
+# Store closed tickets channel IDs for viewing
+closed_tickets = {}
 
 # Config file
 CONFIG_FILE = 'config.json'
@@ -100,6 +100,10 @@ async def create_ticket_channel(interaction, ticket_type, reason):
     support_role_id = config.get('support_role')
     support_role = guild.get_role(support_role_id) if support_role_id else None
     
+    # Get view role (for viewing closed tickets)
+    view_role_id = config.get('view_role')
+    view_role = guild.get_role(view_role_id) if view_role_id else None
+    
     # Permissions
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -110,6 +114,9 @@ async def create_ticket_channel(interaction, ticket_type, reason):
     if support_role:
         overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
     
+    if view_role:
+        overwrites[view_role] = discord.PermissionOverwrite(view_channel=False)  # Can't view open tickets, only closed ones
+    
     # Create channel name based on ticket type
     prefix = "purchase" if ticket_type == "Purchase" else "support"
     channel_name = f"🎫┃{prefix}-{member.name}".lower().replace(" ", "-")[:32]
@@ -119,7 +126,7 @@ async def create_ticket_channel(interaction, ticket_type, reason):
         name=channel_name,
         category=category,
         overwrites=overwrites,
-        topic=f"Ticket Type: {ticket_type} | User: {member.name} | Created: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        topic=f"Ticket Type: {ticket_type} | User: {member.name} | Created: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Status: Open"
     )
     
     # Store ticket info
@@ -127,7 +134,10 @@ async def create_ticket_channel(interaction, ticket_type, reason):
         'user_id': member.id,
         'type': ticket_type,
         'reason': reason,
-        'created_at': datetime.now()
+        'created_at': datetime.now(),
+        'support_role_id': support_role_id,
+        'view_role_id': view_role_id,
+        'category_id': category_id
     }
     
     # Send welcome message in ticket
@@ -158,24 +168,63 @@ class CloseTicketView(View):
         
         # Save transcript
         transcript_text = "\n".join(transcript)
-        with open(f"transcript_{interaction.channel.id}.txt", "w", encoding="utf-8") as f:
+        transcript_filename = f"transcript_{interaction.channel.id}.txt"
+        with open(transcript_filename, "w", encoding="utf-8") as f:
             f.write(transcript_text)
+        
+        # Get ticket info before closing
+        ticket_info = active_tickets.get(interaction.channel.id, {})
+        support_role_id = ticket_info.get('support_role_id')
+        view_role_id = ticket_info.get('view_role_id')
+        category_id = ticket_info.get('category_id')
         
         await asyncio.sleep(5)
         
-        # Delete channel
-        await interaction.channel.delete()
+        # CHANGE: Make channel visible to view_role but keep it
+        if view_role_id:
+            view_role = interaction.guild.get_role(view_role_id)
+            if view_role:
+                # Update permissions so view_role can see closed ticket
+                await interaction.channel.set_permissions(view_role, view_channel=True, send_messages=False, read_message_history=True)
         
-        # Try to send transcript to user (if DM available)
+        # Keep support role but remove write permissions
+        if support_role_id:
+            support_role = interaction.guild.get_role(support_role_id)
+            if support_role:
+                await interaction.channel.set_permissions(support_role, view_channel=True, send_messages=False, read_message_history=True)
+        
+        # Remove user's write permissions (they can still view)
+        user = interaction.user
+        await interaction.channel.set_permissions(user, view_channel=True, send_messages=False, read_message_history=True)
+        
+        # Update channel name to show it's closed
+        new_name = interaction.channel.name.replace("🎫┃", "🔒┃closed-")
+        await interaction.channel.edit(name=new_name, topic=f"CLOSED: {interaction.channel.topic} | Closed: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        
+        # Send final message before locking
+        embed = discord.Embed(
+            title="🔒 Ticket Closed",
+            description=f"This ticket has been closed by {user.mention}\n\n**Support staff can still view this ticket**\nTo reopen, use `!reopen`",
+            color=0xff0000
+        )
+        await interaction.channel.send(embed=embed)
+        
+        # Store in closed tickets
+        closed_tickets[interaction.channel.id] = {
+            'closed_at': datetime.now(),
+            'closed_by': user.id,
+            'transcript': transcript_filename
+        }
+        
+        # Try to send transcript to user
         try:
-            user = interaction.user
-            with open(f"transcript_{interaction.channel.id}.txt", "r", encoding="utf-8") as f:
+            with open(transcript_filename, "r", encoding="utf-8") as f:
                 await user.send(f"📄 Your ticket transcript for {interaction.channel.name}\n", file=discord.File(f))
         except:
             pass
         
-        # Clean up transcript file
-        os.remove(f"transcript_{interaction.channel.id}.txt")
+        # Don't delete the channel - keep it for viewing
+        # os.remove(transcript_filename)  # Keep transcript for now
 
 class MainView(View):
     def __init__(self):
@@ -221,7 +270,7 @@ async def setup(ctx):
         • ⚡ 24/7 Fast Support
         • 🔄 Lifetime Updates
         • 🛡️ Anti-Ban Protection
-        • 🛡️Second id brutual Rank Push Pannel 
+        • 🛡️ Second id brutual Rank Push Pannel 
         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
         ### 💎 **Select an Option Below:**
@@ -259,6 +308,15 @@ async def set_support_role(ctx, role_id: int):
     await ctx.send(f"✅ Support role set to {role.mention}")
 
 @bot.command()
+@commands.has_permissions(administrator=True)
+async def set_view_role(ctx, role_id: int):
+    """Set role that can view closed tickets (Admin only)"""
+    config['view_role'] = role_id
+    save_config(config)
+    role = ctx.guild.get_role(role_id)
+    await ctx.send(f"✅ View role set to {role.mention} - This role can view closed tickets")
+
+@bot.command()
 async def close(ctx):
     """Close current ticket"""
     if ctx.channel.name.startswith(("🎫┃purchase-", "🎫┃support-")):
@@ -266,6 +324,47 @@ async def close(ctx):
         await ctx.send("🔒 Are you sure you want to close this ticket?", view=view)
     else:
         await ctx.send("❌ This command can only be used in ticket channels!")
+
+@bot.command()
+async def reopen(ctx):
+    """Reopen a closed ticket (Support role only)"""
+    if not ctx.channel.name.startswith(("🔒┃closed-purchase-", "🔒┃closed-support-")):
+        await ctx.send("❌ This command can only be used in closed ticket channels!")
+        return
+    
+    # Check if user has support role
+    support_role_id = config.get('support_role')
+    if support_role_id:
+        support_role = ctx.guild.get_role(support_role_id)
+        if support_role not in ctx.author.roles:
+            await ctx.send("❌ Only support staff can reopen tickets!")
+            return
+    
+    # Reopen the ticket
+    new_name = ctx.channel.name.replace("🔒┃closed-", "🎫┃")
+    await ctx.channel.edit(name=new_name, topic=ctx.channel.topic.replace("CLOSED:", "REOPENED:"))
+    
+    # Update permissions
+    support_role_id = config.get('support_role')
+    if support_role_id:
+        support_role = ctx.guild.get_role(support_role_id)
+        if support_role:
+            await ctx.channel.set_permissions(support_role, send_messages=True, read_message_history=True)
+    
+    # Get original user from channel name
+    user_name = ctx.channel.name.split("-")[-1]
+    # Find member and give them permissions back
+    for member in ctx.guild.members:
+        if member.name.lower() == user_name or user_name in member.name.lower():
+            await ctx.channel.set_permissions(member, send_messages=True, read_message_history=True)
+            break
+    
+    embed = discord.Embed(
+        title="🔄 Ticket Reopened",
+        description=f"This ticket has been reopened by {ctx.author.mention}",
+        color=0x00ff00
+    )
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def adduser(ctx, member: discord.Member):
@@ -281,15 +380,49 @@ async def removeuser(ctx, member: discord.Member):
         await ctx.channel.set_permissions(member, view_channel=False)
         await ctx.send(f"✅ Removed {member.mention} from this ticket")
 
+@bot.command()
+async def tickets(ctx):
+    """List all open and closed tickets (Admin only)"""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ This command is for administrators only!")
+        return
+    
+    open_ticket_list = []
+    closed_ticket_list = []
+    
+    for channel in ctx.guild.channels:
+        if isinstance(channel, discord.TextChannel):
+            if channel.name.startswith("🎫┃"):
+                open_ticket_list.append(f"• {channel.mention} - {channel.topic}")
+            elif channel.name.startswith("🔒┃closed-"):
+                closed_ticket_list.append(f"• {channel.mention} - {channel.topic}")
+    
+    embed = discord.Embed(title="📋 Ticket List", color=0x9b59b6)
+    
+    if open_ticket_list:
+        embed.add_field(name="🟢 Open Tickets", value="\n".join(open_ticket_list) or "None", inline=False)
+    else:
+        embed.add_field(name="🟢 Open Tickets", value="No open tickets", inline=False)
+    
+    if closed_ticket_list:
+        embed.add_field(name="🔒 Closed Tickets", value="\n".join(closed_ticket_list) or "None", inline=False)
+    else:
+        embed.add_field(name="🔒 Closed Tickets", value="No closed tickets", inline=False)
+    
+    await ctx.send(embed=embed)
+
 # ========== RUN BOT ==========
 if __name__ == "__main__":
-    # IMPORTANT: Use environment variable for token!
-    # Option 1: Use environment variable (RECOMMENDED for hosting)
+    # Get token from environment variable (for Render)
     TOKEN = os.environ.get('DISCORD_TOKEN')
     
-    # Option 2: If no environment variable, ask for input (for local testing)
+    # If no environment variable, ask for input (for local testing)
     if not TOKEN:
         TOKEN = input("Enter your bot token: ")
+    
+    if not TOKEN:
+        print("❌ ERROR: No bot token provided!")
+        exit(1)
     
     # START THE KEEP-ALIVE SYSTEM
     start_keep_alive()
