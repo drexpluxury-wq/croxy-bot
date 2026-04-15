@@ -1,3 +1,11 @@
+import sys
+import traceback
+
+# Print debug info
+print("=" * 50)
+print("Starting bot...")
+print(f"Python version: {sys.version}")
+print("=" * 50)
 import discord
 from discord.ext import commands
 from discord.ui import Button, View
@@ -18,7 +26,8 @@ def home():
     return "Bot is alive and running!"
 
 def run_webserver():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def self_ping():
     """Pings itself every 4 minutes to stay awake"""
@@ -410,22 +419,32 @@ async def tickets(ctx):
         embed.add_field(name="🔒 Closed Tickets", value="No closed tickets", inline=False)
     
     await ctx.send(embed=embed)
-
 # ========== RUN BOT ==========
 if __name__ == "__main__":
-    # Get token from environment variable (for Render)
-    TOKEN = os.environ.get('DISCORD_TOKEN')
-    
-    # If no environment variable, ask for input (for local testing)
-    if not TOKEN:
-        TOKEN = input("Enter your bot token: ")
-    
-    if not TOKEN:
-        print("❌ ERROR: No bot token provided!")
+    try:
+        # Get token from environment variable (for Render)
+        TOKEN = os.environ.get('DISCORD_TOKEN')
+        
+        # If no environment variable, ask for input (for local testing)
+        if not TOKEN:
+            TOKEN = input("Enter your bot token: ")
+        
+        if not TOKEN:
+            print("❌ ERROR: No bot token provided!")
+            exit(1)
+        
+        print(f"Token found: {'Yes' if TOKEN else 'No'}")
+        print(f"Token length: {len(TOKEN) if TOKEN else 0}")
+        
+        # START THE KEEP-ALIVE SYSTEM
+        print("Starting keep-alive system...")
+        start_keep_alive()
+        
+        print("Starting Discord bot...")
+        # Run your bot
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         exit(1)
-    
-    # START THE KEEP-ALIVE SYSTEM
-    start_keep_alive()
-    
-    # Run your bot
-    bot.run(TOKEN)
